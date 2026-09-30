@@ -1,0 +1,13 @@
+node_modules/
+web/dist/
+/cmd/mulitgit/web/dist/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+/mulitgit
+/mulitgit.exe
