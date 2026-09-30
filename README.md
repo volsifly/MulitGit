@@ -131,6 +131,10 @@ flowchart LR
 - **模型接口**：兼容 OpenAI Chat Completions API 的服务
 - **打包**：Go `embed` 内嵌前端产物，支持 Go 跨平台编译
 
+## 许可证
+
+MulitGit 使用 [MIT License](LICENSE) 开源。第三方依赖仍遵循各自的许可证。
+
 ## 项目状态
 
 MulitGit 正在持续迭代，当前重点是把多仓库日常审查流程放进一个本地工作台。欢迎提交问题、体验反馈和改进建议。
