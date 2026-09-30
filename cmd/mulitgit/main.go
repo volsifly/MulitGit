@@ -108,6 +108,7 @@ func main() {
 	mux.HandleFunc("/api/asset", api.handleAsset)
 	mux.HandleFunc("/api/fetch", api.handleFetch)
 	mux.HandleFunc("/api/pull", api.handlePull)
+	mux.HandleFunc("/api/push", api.handlePush)
 	mux.HandleFunc("/api/commit", api.handleCommit)
 	mux.HandleFunc("/api/discard", api.handleDiscard)
 	mux.HandleFunc("/api/settings", api.handleSettings)
@@ -661,6 +662,126 @@ func (a *API) handlePull(w http.ResponseWriter, r *http.Request) {
 	}
 	a.requestRepositoryRefresh()
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func (a *API) handlePush(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var body struct {
+		Path string `json:"path"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	path, err := a.authorizedRepo(body.Path)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	repo, err := loadRepository(path)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if repo.Branch == "detached" || strings.TrimSpace(repo.Branch) == "" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前处于 detached HEAD，无法推送分支"})
+		return
+	}
+	branch := strings.TrimSpace(repo.Branch)
+	if _, err := git(path, "check-ref-format", "--branch", branch); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前分支名称无效，无法推送"})
+		return
+	}
+	remoteName := ""
+	mergeRef := "refs/heads/" + branch
+	setUpstream := repo.Upstream == ""
+	if setUpstream {
+		remoteName = "origin"
+	} else {
+		remoteName, err = git(path, "config", "--get", "branch."+branch+".remote")
+		if err == nil {
+			remoteName = strings.TrimSpace(remoteName)
+		}
+		if remoteName != "" {
+			mergeRef, err = git(path, "config", "--get", "branch."+branch+".merge")
+			if err == nil {
+				mergeRef = strings.TrimSpace(mergeRef)
+			}
+		}
+		if remoteName == "" || err != nil || !strings.HasPrefix(mergeRef, "refs/heads/") {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "无法读取当前分支的 upstream 配置"})
+			return
+		}
+		if _, err := git(path, "check-ref-format", mergeRef); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "upstream 分支名称无效，无法推送"})
+			return
+		}
+	}
+	remoteOutput, err := git(path, "remote")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	remoteFound := false
+	for _, configuredRemote := range strings.Split(strings.TrimSpace(remoteOutput), "\n") {
+		if strings.TrimSpace(configuredRemote) == remoteName {
+			remoteFound = true
+			break
+		}
+	}
+	if !remoteFound {
+		if setUpstream {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "仓库没有配置 origin 远端，无法发布当前分支"})
+		} else {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "当前分支配置的远端不存在：" + remoteName})
+		}
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	if !setUpstream {
+		if _, err := gitContext(ctx, path, "fetch", "--no-tags", remoteName); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "推送前刷新远端状态失败：" + err.Error()})
+			return
+		}
+		repo, err = loadRepository(path)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if repo.Behind > 0 {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": fmt.Sprintf("远端已有 %d 个本地尚未包含的提交，请先拉取或处理分叉后再推送", repo.Behind)})
+			return
+		}
+		if repo.Ahead == 0 {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "没有领先远端的本地提交可推送"})
+			return
+		}
+	}
+	args := []string{"push", "--porcelain"}
+	if setUpstream {
+		args = append(args, "--set-upstream")
+	}
+	args = append(args, "--", remoteName, "HEAD:"+mergeRef)
+	output, err := gitContext(ctx, path, args...)
+	if err != nil {
+		message := strings.TrimSpace(output + "\n" + err.Error())
+		if len(message) > 1200 {
+			message = message[:1200]
+		}
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "推送失败：" + message})
+		return
+	}
+	updated, err := loadRepository(path)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	a.requestRepositoryRefresh()
+	writeJSON(w, http.StatusOK, map[string]any{"output": output, "repo": updated, "published": setUpstream})
 }
 
 func (a *API) handleCommit(w http.ResponseWriter, r *http.Request) {

@@ -138,3 +138,6 @@
 .ai-composer .primary-button{height:39px;min-width:74px;padding:0 12px}
 .ai-chat-foot{padding:0 19px 10px;background:#fff;color:#a0a7af;font-size:calc(8px * var(--ui-font-scale, 1));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .commit-box textarea{min-height:300px;line-height:1.55}
+.push-button{height:30px;border-color:#d7e8de;color:#347455;background:#f4f9f6;white-space:nowrap}
+.push-button:hover{background:#e8f4ed;color:#286447}
+.topbar-right>.icon-button{display:grid;place-items:center;padding:0;line-height:1}

@@ -33,7 +33,7 @@ MulitGit 想提供一个简单的审查入口：
 | 阅读文件 | Markdown 渲染、代码语法高亮、图片预览 |
 | AI 代码审查 | 总结单文件或仓库内全部变更；在同一对话中连续追问，Markdown 回复支持代码高亮 |
 | 整理提交 | 选择文件提交；按 Conventional Commits 模板和自定义规范生成可编辑的 commit message；支持逐文件撤销修改 |
-| 远端检查 | 打开仓库时检查 upstream 状态；显示远端更新，并由你确认后执行 fast-forward 拉取 |
+| 远端协作 | 显示本地领先/落后提交；确认后安全推送或 fast-forward 拉取；无 upstream 时可将当前分支首次发布到 `origin` |
 | 阅读体验 | 设置界面字号、代码字体与自动换行 |
 
 ## 用 AI 审查 AI 生成的改动

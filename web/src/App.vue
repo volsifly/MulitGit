@@ -301,6 +301,31 @@ async function pullRepo() {
   } catch (cause) { error.value = (cause as Error).message }
   finally { busy.value = '' }
 }
+async function pushRepo() {
+  const repo = selectedRepo.value
+  if (!repo) return
+  const publishing = !repo.upstream
+  const destination = publishing ? `origin/${repo.branch}` : repo.upstream
+  if (!publishing && repo.behind > 0) {
+    error.value = '远端已有新提交，请先拉取或处理分叉后再推送。'
+    return
+  }
+  const confirmation = publishing
+    ? `首次发布分支 ${repo.branch} 到 ${destination} 并设置 upstream？`
+    : `推送 ${repo.ahead} 个本地提交到 ${destination}？`
+  const details = repo.dirty ? '\n\n未提交的文件修改不会上传；只有已提交的内容会被推送。' : '\n\n只会推送已提交的内容。'
+  if (!window.confirm(`${confirmation}${details}\nGit 会拒绝非快进推送，不会强制覆盖远端。`)) return
+  busy.value = 'push'
+  error.value = ''
+  try {
+    const result = await api<{ repo: Repository; published: boolean }>('/api/push', {
+      method: 'POST', body: JSON.stringify({ path: repo.path }),
+    })
+    updateRepo(result.repo)
+    notice.value = result.published ? `分支已发布到 ${result.repo.upstream || destination}，并设置了 upstream。` : `已推送到 ${result.repo.upstream || destination}。`
+  } catch (cause) { error.value = (cause as Error).message }
+  finally { busy.value = '' }
+}
 async function commitSelected() {
   const repo = selectedRepo.value
   if (!repo || !selectedFiles.value.length || !commitMessage.value.trim()) {
@@ -503,7 +528,7 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
                 <div v-if="items.some(repo => repo.path === root || repo.path.startsWith(root + '/') || repo.path.startsWith(root + '\\'))" class="folder-group">
                   <div class="nested-folder"><span>⌄</span><span>▱</span><span>{{ group === root ? '此目录' : shortPath(group) }}</span></div>
                   <button v-for="repo in items.filter(item => item.path === root || item.path.startsWith(root + '/') || item.path.startsWith(root + '\\'))" :key="repo.path" class="repo-row" :class="{ active: selectedRepoPath === repo.path }" @click="selectRepo(repo)">
-                    <span class="repo-indicator" :class="{ dirty: repo.dirty }"></span><span class="repo-glyph">⌘</span><span class="repo-label"><b>{{ repo.name }}</b><small>{{ repo.branch }}</small></span><span v-if="repo.behind" class="ahead-badge">↓{{ repo.behind }}</span>
+                    <span class="repo-indicator" :class="{ dirty: repo.dirty }"></span><span class="repo-glyph">⌘</span><span class="repo-label"><b>{{ repo.name }}</b><small>{{ repo.branch }}</small></span><span v-if="repo.behind" class="ahead-badge" :title="`远端领先 ${repo.behind} 个提交，可拉取`">↓{{ repo.behind }}</span><span v-if="repo.ahead" class="ahead-badge" :title="`${repo.ahead} 个本地提交尚未推送`">↑{{ repo.ahead }}</span>
                   </button>
                 </div>
               </template>
@@ -539,7 +564,7 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
 
       <section class="inspector panel">
         <template v-if="selectedRepo">
-          <div class="inspector-header"><div><span class="eyebrow">{{ selectedFilePath ? 'FILE INSPECTOR' : 'REPOSITORY' }}</span><h2>{{ selectedFilePath || selectedRepo.name }}</h2></div><div class="inspector-tools"><button class="outline-button" :disabled="busy === 'fetch'" @click="fetchRemote()">{{ busy === 'fetch' ? '检查中…' : '↻ 检查远端' }}</button><button v-if="selectedRepo.behind > 0" class="primary-button pull-button" :disabled="busy === 'pull' || selectedRepo.dirty" :title="selectedRepo.dirty ? '先处理本地修改' : ''" @click="pullRepo">↓ 拉取 {{ selectedRepo.behind }}</button></div></div>
+          <div class="inspector-header"><div><span class="eyebrow">{{ selectedFilePath ? 'FILE INSPECTOR' : 'REPOSITORY' }}</span><h2>{{ selectedFilePath || selectedRepo.name }}</h2></div><div class="inspector-tools"><button class="outline-button" :disabled="busy !== ''" @click="fetchRemote()">{{ busy === 'fetch' ? '检查中…' : '↻ 检查远端' }}</button><button v-if="selectedRepo.behind > 0" class="primary-button pull-button" :disabled="busy !== '' || selectedRepo.dirty" :title="selectedRepo.dirty ? '先处理本地修改' : ''" @click="pullRepo">↓ 拉取 {{ selectedRepo.behind }}</button><button v-if="selectedRepo.ahead > 0 || !selectedRepo.upstream" class="outline-button push-button" :disabled="busy !== '' || (Boolean(selectedRepo.upstream) && selectedRepo.behind > 0)" :title="selectedRepo.behind > 0 ? '远端已有新提交，请先同步' : ''" @click="pushRepo">{{ busy === 'push' ? '推送中…' : selectedRepo.upstream ? `↑ 推送 ${selectedRepo.ahead}` : '↑ 发布分支' }}</button></div></div>
           <div class="remote-strip"><span class="branch-chip"><span>⑂</span>{{ selectedRepo.branch }}</span><span v-if="selectedRepo.upstream" class="remote-text">跟踪 {{ selectedRepo.upstream }} <span v-if="selectedRepo.ahead">· ↑{{ selectedRepo.ahead }}</span><span v-if="selectedRepo.behind">· ↓{{ selectedRepo.behind }}</span><span v-if="!selectedRepo.ahead && !selectedRepo.behind">· 已同步</span></span><span v-else class="remote-text">尚未设置 upstream</span><span class="remote-time">{{ formatDate(selectedRepo.lastFetch) }}</span></div>
           <div v-if="selectedFilePath" class="tabs"><button :class="{ active: activeTab === 'diff' }" @click="activeTab = 'diff'">Diff</button><button :class="{ active: activeTab === 'preview' }" @click="activeTab = 'preview'">文件预览</button><button :class="{ active: activeTab === 'summary' }" @click="activeTab = 'summary'">✦ AI 总结</button></div>
           <template v-if="selectedFilePath && fileContent">
