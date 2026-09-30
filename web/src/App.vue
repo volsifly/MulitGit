@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { isMarkdownPath, renderCode, renderMarkdown } from './rendering'
 
-type ChangedFile = { path: string; code: string; staged: boolean; status: string }
+type ChangedFile = { path: string; originalPath?: string; code: string; staged: boolean; status: string }
 type Repository = {
   path: string; name: string; branch: string; dirty: boolean; files: ChangedFile[]
   upstream?: string; ahead: number; behind: number; lastFetch?: string; fetchError?: string; createdAt?: number; lastModified: number
@@ -10,6 +10,8 @@ type Repository = {
 type RepoSort = 'name' | 'created' | 'modified'
 type RootConfig = { watchRoots: string[] }
 type FileContent = { path: string; preview: string; binary: boolean; truncated: boolean; deleted: boolean; diff: string }
+type AIMessage = { role: 'user' | 'assistant'; content: string }
+type CompareRow = { leftLine?: number; rightLine?: number; leftText: string; rightText: string; leftKind: 'context' | 'removed' | 'empty'; rightKind: 'context' | 'added' | 'empty' }
 type AppSettings = { baseUrl: string; model: string; apiKey: string; fontSize: number; fontFamily: 'system' | 'mono'; wordWrap: boolean; commitTemplate: string; commitGuidelines: string }
 
 const defaultSettings: AppSettings = {
@@ -25,7 +27,9 @@ const selectedRepoPath = ref('')
 const selectedFilePath = ref('')
 const selectedFiles = ref<string[]>([])
 const activeTab = ref<'diff' | 'preview' | 'summary'>('diff')
+const diffMode = ref<'side-by-side' | 'unified'>('side-by-side')
 const fileContent = ref<FileContent | null>(null)
+const imagePreviewFailed = ref(false)
 const commitMessage = ref('')
 const busy = ref('')
 const error = ref('')
@@ -38,11 +42,20 @@ const settings = ref<AppSettings>({ ...defaultSettings })
 const showApiKey = ref(false)
 const settingsBusy = ref('')
 const aiBusy = ref(false)
-const aiSummary = ref('')
+const aiMessages = ref<AIMessage[]>([])
+const aiPrompt = ref('')
+const aiScope = ref<'file' | 'all'>('file')
+const aiMessagesElement = ref<HTMLElement | null>(null)
+const aiContextVersion = ref(0)
 let refreshTimer: number | undefined
 
 const selectedRepo = computed(() => repos.value.find(repo => repo.path === selectedRepoPath.value) ?? null)
 const visibleFiles = computed(() => (selectedRepo.value?.files ?? []).filter(file => file.path.toLowerCase().includes(filter.value.toLowerCase())))
+const splitDiffRows = computed(() => parseUnifiedDiff(fileContent.value?.diff ?? ''))
+const isImagePreview = computed(() => isImagePath(selectedFilePath.value))
+const imagePreviewUrl = computed(() => selectedRepoPath.value && selectedFilePath.value
+  ? `/api/asset?repo=${encodeURIComponent(selectedRepoPath.value)}&path=${encodeURIComponent(selectedFilePath.value)}`
+  : '')
 const groupedRepos = computed(() => {
   const result = new Map<string, Repository[]>()
   for (const repo of [...repos.value].sort(compareRepos)) {
@@ -85,6 +98,62 @@ function compareRepos(a: Repository, b: Repository) {
 }
 function changeRepoSort() {
   localStorage.setItem('mulitgit.repoSort', repoSort.value)
+}
+function isImagePath(path: string) {
+  return /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i.test(path)
+}
+function parseUnifiedDiff(diff: string): CompareRow[] {
+  const rows: CompareRow[] = []
+  let oldLine = 0
+  let newLine = 0
+  let inHunk = false
+  let removed: Array<{ line: number; text: string }> = []
+  let added: Array<{ line: number; text: string }> = []
+
+  const flushChanges = () => {
+    const count = Math.max(removed.length, added.length)
+    for (let index = 0; index < count; index++) {
+      const left = removed[index]
+      const right = added[index]
+      rows.push({
+        leftLine: left?.line,
+        rightLine: right?.line,
+        leftText: left?.text ?? '',
+        rightText: right?.text ?? '',
+        leftKind: left ? 'removed' : 'empty',
+        rightKind: right ? 'added' : 'empty',
+      })
+    }
+    removed = []
+    added = []
+  }
+
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('@@ ')) {
+      flushChanges()
+      inHunk = true
+      const header = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
+      if (header) {
+        oldLine = Number(header[1])
+        newLine = Number(header[2])
+      }
+      continue
+    }
+    if (!inHunk) continue
+    if (line.startsWith(' ')) {
+      flushChanges()
+      rows.push({ leftLine: oldLine++, rightLine: newLine++, leftText: line.slice(1), rightText: line.slice(1), leftKind: 'context', rightKind: 'context' })
+    } else if (line.startsWith('-')) {
+      removed.push({ line: oldLine++, text: line.slice(1) })
+    } else if (line.startsWith('+')) {
+      added.push({ line: newLine++, text: line.slice(1) })
+    } else if (!line.startsWith('\\')) {
+      flushChanges()
+      inHunk = false
+    }
+  }
+  flushChanges()
+  return rows
 }
 function shortPath(path: string) {
   const normalized = path.replaceAll('\\', '/')
@@ -163,6 +232,10 @@ async function removeRoot(index: number) {
 async function selectRepo(repo: Repository) {
   selectedRepoPath.value = repo.path
   selectedFilePath.value = ''
+  aiContextVersion.value++
+  aiScope.value = 'file'
+  aiMessages.value = []
+  aiPrompt.value = ''
   selectedFiles.value = repo.files.map(file => file.path)
   fileContent.value = null
   activeTab.value = 'diff'
@@ -182,9 +255,13 @@ function updateRepo(updated: Repository) {
 }
 async function selectFile(path: string) {
   selectedFilePath.value = path
-  aiSummary.value = ''
+  aiContextVersion.value++
+  aiScope.value = 'file'
+  aiMessages.value = []
+  aiPrompt.value = ''
   activeTab.value = 'diff'
   fileContent.value = null
+  imagePreviewFailed.value = false
   if (!selectedRepoPath.value) return
   try {
     fileContent.value = await api<FileContent>(`/api/file?repo=${encodeURIComponent(selectedRepoPath.value)}&path=${encodeURIComponent(path)}`)
@@ -245,6 +322,33 @@ async function commitSelected() {
   } catch (cause) { error.value = (cause as Error).message }
   finally { busy.value = '' }
 }
+async function discardFile(file: ChangedFile) {
+  const repo = selectedRepo.value
+  if (!repo) return
+  const consequence = file.code === '??' || file.code.includes('A')
+    ? '该文件将被删除。'
+    : file.status === '重命名'
+      ? `文件将恢复为原路径 ${file.originalPath ?? ''}，重命名会被撤销。`
+      : '该文件的暂存区和工作区修改都会恢复到最近一次提交。'
+  if (!window.confirm(`撤销 ${file.path} 的修改？\n\n${consequence}\n此操作无法通过 MulitGit 撤回。`)) return
+  busy.value = `discard:${file.path}`
+  error.value = ''
+  try {
+    const updated = await api<Repository>('/api/discard', {
+      method: 'POST', body: JSON.stringify({ path: repo.path, file: file.path }),
+    })
+    updateRepo(updated)
+    selectedFiles.value = selectedFiles.value.filter(path => updated.files.some(item => item.path === path))
+    if (selectedFilePath.value === file.path) {
+      selectedFilePath.value = ''
+      fileContent.value = null
+      aiMessages.value = []
+    }
+    notice.value = `已撤销 ${file.path} 的修改。`
+    await refreshRepos()
+  } catch (cause) { error.value = (cause as Error).message }
+  finally { busy.value = '' }
+}
 async function saveSettings() {
   settingsBusy.value = 'save'
   error.value = ''
@@ -264,18 +368,56 @@ async function testModel() {
   } catch (cause) { error.value = (cause as Error).message }
   finally { settingsBusy.value = '' }
 }
-async function generateAISummary() {
-  if (!selectedRepo.value || !selectedFilePath.value) return
+async function setAIScope(scope: 'file' | 'all') {
+  if (aiScope.value === scope) return
+  aiScope.value = scope
+  aiContextVersion.value++
+  aiMessages.value = []
+  aiPrompt.value = ''
+  await nextTick()
+  aiMessagesElement.value?.scrollTo({ top: 0 })
+}
+async function startAISummary(scope: 'file' | 'all') {
+  await setAIScope(scope)
+  aiContextVersion.value++
+  aiMessages.value = []
+  await sendAIMessage(scope === 'file' ? '请总结当前文件的修改内容、改动原因和可能影响。' : '请总结本仓库所有修改文件的整体内容，归纳主要改动和可能影响。')
+}
+function clearAIConversation() {
+  aiContextVersion.value++
+  aiMessages.value = []
+  aiPrompt.value = ''
+}
+async function sendAIMessage(text = aiPrompt.value) {
+  if (!selectedRepo.value || !selectedFilePath.value || aiBusy.value || (!settings.value.baseUrl || !settings.value.model)) return
+  const content = text.trim()
+  if (!content) return
+  const previous = aiMessages.value.slice()
+  const contextVersion = aiContextVersion.value
+  const conversation = [...previous, { role: 'user' as const, content }]
+  aiMessages.value = conversation
+  aiPrompt.value = ''
   aiBusy.value = true
   error.value = ''
+  await nextTick()
+  if (aiMessagesElement.value) aiMessagesElement.value.scrollTop = aiMessagesElement.value.scrollHeight
   try {
     const result = await api<{ content: string }>('/api/ai/generate', {
       method: 'POST',
-      body: JSON.stringify({ repo: selectedRepo.value.path, task: 'summary', path: selectedFilePath.value, apiKey: settings.value.apiKey }),
+      body: JSON.stringify({ repo: selectedRepo.value.path, task: 'chat', scope: aiScope.value, path: selectedFilePath.value, messages: conversation.slice(-20), apiKey: settings.value.apiKey }),
     })
-    aiSummary.value = result.content
-  } catch (cause) { error.value = (cause as Error).message }
-  finally { aiBusy.value = false }
+    if (contextVersion === aiContextVersion.value) {
+      aiMessages.value.push({ role: 'assistant', content: result.content })
+      await nextTick()
+      if (aiMessagesElement.value) aiMessagesElement.value.scrollTop = aiMessagesElement.value.scrollHeight
+    }
+  } catch (cause) {
+    if (contextVersion === aiContextVersion.value) {
+      aiMessages.value = previous
+      aiPrompt.value = content
+      error.value = (cause as Error).message
+    }
+  } finally { aiBusy.value = false }
 }
 async function generateCommitDraft() {
   error.value = ''
@@ -328,7 +470,7 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
           <label class="settings-field"><span>API Base URL</span><input v-model="settings.baseUrl" placeholder="https://api.openai.com/v1" spellcheck="false" autocomplete="url" /></label>
           <label class="settings-field"><span>模型名称</span><input v-model="settings.model" placeholder="例如 gpt-4o-mini" spellcheck="false" /></label>
           <label class="settings-field"><span>API Key <small>可选，取决于服务配置</small></span><div class="secret-input"><input v-model="settings.apiKey" :type="showApiKey ? 'text' : 'password'" placeholder="输入 API Key" autocomplete="off"/><button class="secret-toggle" type="button" @click="showApiKey = !showApiKey">{{ showApiKey ? '隐藏' : '显示' }}</button></div></label>
-          <div class="settings-hint">API Key 会保存在本机私有配置中并在重新进入设置时回填。生成总结或 commit 信息时，只会发送所选文件的 diff，最大 512 KB。</div>
+          <div class="settings-hint">API Key 会保存在本机私有配置中并在重新进入设置时回填。AI 总结和追问只会发送当前文件或全部变更文件的 diff，最大 512 KB。</div>
           <div class="settings-actions"><button class="outline-button" :disabled="settingsBusy !== ''" @click="testModel">{{ settingsBusy === 'test' ? '连接中…' : '测试连接' }}</button><button class="primary-button" :disabled="settingsBusy !== ''" @click="saveSettings">{{ settingsBusy === 'save' ? '保存中…' : '保存模型设置' }}</button></div>
         </section>
         <section id="commit-template" class="settings-card panel">
@@ -380,15 +522,15 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
           <div class="filter-wrap"><span>⌕</span><input v-model="filter" placeholder="筛选文件" /><kbd>⌘ K</kbd></div>
           <div class="file-actions"><label class="check-all"><input type="checkbox" :checked="visibleFiles.length > 0 && selectedFiles.length === visibleFiles.length" @change="toggleAll" /> 全选</label><span>{{ selectedCount }} 已选</span></div>
           <div class="file-list">
-            <button v-for="file in visibleFiles" :key="file.path" class="file-row" :class="{ chosen: selectedFilePath === file.path }" @click="selectFile(file.path)">
+            <div v-for="file in visibleFiles" :key="file.path" class="file-row" :class="{ chosen: selectedFilePath === file.path }" role="group" :aria-label="file.path" @click="selectFile(file.path)">
               <input type="checkbox" :checked="selectedFiles.includes(file.path)" @click.stop @change="toggleFile(file.path)" />
-              <span class="file-status" :class="statusClass(file.code)">{{ iconFor(file.code) }}</span><span class="file-path" :title="file.path">{{ file.path.split('/').slice(-1)[0] }}<small v-if="file.path.includes('/')">{{ file.path.split('/').slice(0,-1).join('/') }}</small></span><span v-if="file.staged" class="staged-dot" title="已暂存"></span>
-            </button>
+              <span class="file-status" :class="statusClass(file.code)">{{ iconFor(file.code) }}</span><span class="file-path" :title="file.path">{{ file.path.split('/').slice(-1)[0] }}<small v-if="file.path.includes('/')">{{ file.path.split('/').slice(0,-1).join('/') }}</small></span><span v-if="file.staged" class="staged-dot" title="已暂存"></span><button class="file-discard" type="button" :title="file.status === '冲突' ? '请先处理 Git 冲突' : '撤销此文件修改'" :aria-label="file.status === '冲突' ? '请先处理 Git 冲突' : '撤销此文件修改'" :disabled="busy !== '' || file.status === '冲突'" @click.stop="discardFile(file)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h9a7 7 0 1 1-6.2 10.2"/></svg></button>
+            </div>
             <div v-if="!visibleFiles.length" class="empty-state file-empty"><div class="empty-icon">✓</div><strong>工作区干净</strong><span>当前仓库没有待提交修改</span></div>
           </div>
           <div class="commit-box">
             <div class="commit-label"><span>COMMIT MESSAGE</span><button class="draft-button" :disabled="!selectedCount || aiBusy" @click="generateCommitDraft">{{ aiBusy ? '起草中…' : '✦ AI 起草' }}</button></div>
-            <textarea v-model="commitMessage" placeholder="描述这次修改…" rows="3"></textarea>
+            <textarea v-model="commitMessage" placeholder="描述这次修改…" rows="5"></textarea>
             <button class="primary-button commit-button" :disabled="busy === 'commit' || !selectedCount || !commitMessage.trim()" @click="commitSelected"><span>{{ busy === 'commit' ? '提交中…' : `提交 ${selectedCount} 个文件` }}</span><span>↗</span></button>
           </div>
         </template>
@@ -401,9 +543,35 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
           <div class="remote-strip"><span class="branch-chip"><span>⑂</span>{{ selectedRepo.branch }}</span><span v-if="selectedRepo.upstream" class="remote-text">跟踪 {{ selectedRepo.upstream }} <span v-if="selectedRepo.ahead">· ↑{{ selectedRepo.ahead }}</span><span v-if="selectedRepo.behind">· ↓{{ selectedRepo.behind }}</span><span v-if="!selectedRepo.ahead && !selectedRepo.behind">· 已同步</span></span><span v-else class="remote-text">尚未设置 upstream</span><span class="remote-time">{{ formatDate(selectedRepo.lastFetch) }}</span></div>
           <div v-if="selectedFilePath" class="tabs"><button :class="{ active: activeTab === 'diff' }" @click="activeTab = 'diff'">Diff</button><button :class="{ active: activeTab === 'preview' }" @click="activeTab = 'preview'">文件预览</button><button :class="{ active: activeTab === 'summary' }" @click="activeTab = 'summary'">✦ AI 总结</button></div>
           <template v-if="selectedFilePath && fileContent">
-            <div v-if="activeTab === 'diff'" class="code-view diff-view"><pre>{{ fileContent.diff || '没有可展示的差异。' }}</pre></div>
-            <div v-else-if="activeTab === 'preview'" class="code-view preview-view" :class="{ 'markdown-view': isMarkdownPreview }"><div v-if="fileContent.binary" class="inline-empty">该文件为二进制文件，暂不支持文本预览。</div><div v-else-if="fileContent.deleted" class="inline-empty">文件已删除。</div><template v-else><article v-if="isMarkdownPreview" class="markdown-content" v-html="renderedMarkdown"></article><pre v-else class="highlighted-source" :class="{ wrapped: settings.wordWrap }"><code v-html="highlightedPreview"></code></pre><div v-if="fileContent.truncated" class="truncate-note">文件较大，预览仅显示前 512 KB。</div></template></div>
-            <div v-else class="ai-panel"><div class="ai-placeholder"><div class="sparkle">✦</div><h3>AI 修改总结</h3><p>生成时会把当前文件 diff 发送到已配置的模型服务。</p><span class="scope-note">{{ settings.model ? `${settings.model} · ${settings.baseUrl}` : '尚未配置模型' }}</span><button class="primary-button ai-generate-button" :disabled="aiBusy || !settings.baseUrl || !settings.model" @click="generateAISummary">{{ aiBusy ? '生成中…' : aiSummary ? '重新生成' : '生成修改总结' }}</button><button v-if="!settings.baseUrl || !settings.model" class="text-button" @click="page = 'settings'">前往模型设置</button></div><div v-if="aiSummary" class="ai-result"><span class="eyebrow">AI SUMMARY</span><pre>{{ aiSummary }}</pre></div></div>
+            <div v-if="activeTab === 'diff'" class="code-view diff-panel">
+              <div class="diff-toolbar"><span>比较 <b>HEAD</b> 与 <b>工作区</b></span><div class="diff-mode-switch"><button :class="{ active: diffMode === 'side-by-side' }" @click="diffMode = 'side-by-side'">并排</button><button :class="{ active: diffMode === 'unified' }" @click="diffMode = 'unified'">统一</button></div></div>
+              <div v-if="diffMode === 'side-by-side' && splitDiffRows.length" class="split-diff">
+                <div class="split-diff-head"><span>HEAD 基线</span><span>当前工作区</span></div>
+                <div v-for="(row, index) in splitDiffRows" :key="index" class="split-diff-row">
+                  <div class="split-diff-cell" :class="row.leftKind"><span class="diff-line-number">{{ row.leftLine ?? '' }}</span><code>{{ row.leftText }}</code></div>
+                  <div class="split-diff-cell" :class="row.rightKind"><span class="diff-line-number">{{ row.rightLine ?? '' }}</span><code>{{ row.rightText }}</code></div>
+                </div>
+              </div>
+              <div v-else-if="diffMode === 'side-by-side'" class="inline-empty">{{ fileContent.binary || fileContent.diff.includes('Binary files') ? '二进制文件无法逐行比较，可在“文件预览”中查看图片。' : fileContent.diff || '没有可展示的差异。' }}</div>
+              <div v-else class="diff-view"><pre>{{ fileContent.diff || '没有可展示的差异。' }}</pre></div>
+            </div>
+            <div v-else-if="activeTab === 'preview'" class="code-view preview-view" :class="{ 'markdown-view': isMarkdownPreview, 'image-preview-view': isImagePreview }">
+              <div v-if="fileContent.deleted" class="inline-empty">文件已删除。</div>
+              <div v-else-if="isImagePreview" class="image-preview-pane"><img v-if="!imagePreviewFailed" :src="imagePreviewUrl" :alt="selectedFilePath" @error="imagePreviewFailed = true" /><div v-else class="inline-empty">图片无法加载，可能超过 8 MiB 或格式不受支持。</div></div>
+              <div v-else-if="fileContent.binary" class="inline-empty">该文件为二进制文件，暂不支持预览。</div>
+              <template v-else><article v-if="isMarkdownPreview" class="markdown-content" v-html="renderedMarkdown"></article><pre v-else class="highlighted-source" :class="{ wrapped: settings.wordWrap }"><code v-html="highlightedPreview"></code></pre><div v-if="fileContent.truncated" class="truncate-note">文件较大，预览仅显示前 512 KB。</div></template>
+            </div>
+            <div v-else class="ai-panel ai-chat-panel">
+              <div class="ai-chat-heading"><div><strong>AI 修改助手</strong><small>{{ settings.model || '尚未配置模型' }}</small></div><div class="ai-chat-tools"><div class="ai-scope-switch"><button :class="{ active: aiScope === 'file' }" @click="setAIScope('file')">当前文件</button><button :class="{ active: aiScope === 'all' }" @click="setAIScope('all')">全部修改 {{ selectedRepo.files.length }}</button></div><button v-if="aiMessages.length" class="ai-clear-button" title="清空对话" aria-label="清空对话" @click="clearAIConversation">↺</button></div></div>
+              <div v-if="!settings.baseUrl || !settings.model" class="ai-config-note">先配置模型服务，才能开始总结和追问。<button class="text-button" @click="page = 'settings'">前往模型设置</button></div>
+              <div ref="aiMessagesElement" class="ai-conversation">
+                <div v-if="!aiMessages.length" class="ai-chat-empty"><div class="sparkle">✦</div><h3>{{ aiScope === 'file' ? '总结当前文件的修改' : '总结仓库全部修改' }}</h3><p>{{ aiScope === 'file' ? selectedFilePath : `将分析 ${selectedRepo.files.length} 个变更文件，并在对话中继续追问。` }}</p><button class="primary-button" :disabled="aiBusy || !settings.baseUrl || !settings.model || (aiScope === 'all' && !selectedRepo.files.length)" @click="startAISummary(aiScope)">{{ aiBusy ? '分析中…' : aiScope === 'file' ? '开始总结当前文件' : `总结全部 ${selectedRepo.files.length} 个文件` }}</button></div>
+                <div v-for="(message, index) in aiMessages" :key="index" class="ai-turn" :class="message.role"><span class="ai-avatar">{{ message.role === 'assistant' ? '✦' : '我' }}</span><div class="ai-bubble"><article v-if="message.role === 'assistant'" class="markdown-content ai-message-markdown" v-html="renderMarkdown(message.content, selectedRepoPath, selectedFilePath || 'README.md')"></article><p v-else>{{ message.content }}</p></div></div>
+                <div v-if="aiBusy" class="ai-turn assistant"><span class="ai-avatar">✦</span><div class="ai-bubble ai-thinking">正在分析…</div></div>
+              </div>
+              <form class="ai-composer" @submit.prevent="sendAIMessage()"><textarea v-model="aiPrompt" rows="2" :disabled="aiBusy || !settings.baseUrl || !settings.model" placeholder="继续追问，例如：这个改动会影响哪些调用方？" @keydown.ctrl.enter.prevent="sendAIMessage()" @keydown.meta.enter.prevent="sendAIMessage()"></textarea><button class="primary-button" type="submit" :disabled="aiBusy || !aiPrompt.trim() || !settings.baseUrl || !settings.model">{{ aiBusy ? '思考中…' : '发送' }}<span>↗</span></button></form>
+              <div class="ai-chat-foot">{{ aiScope === 'file' ? `上下文：${selectedFilePath}` : `上下文：全部 ${selectedRepo.files.length} 个变更文件` }} · diff 最大 512 KB</div>
+            </div>
           </template>
           <div v-else-if="!selectedFilePath" class="repo-overview"><div class="overview-card"><span class="overview-icon">⌘</span><div><small>当前分支</small><strong>{{ selectedRepo.branch }}</strong></div></div><div class="overview-card"><span class="overview-icon">◉</span><div><small>本地状态</small><strong>{{ selectedRepo.files.length ? `${selectedRepo.files.length} 个变更文件` : '工作区干净' }}</strong></div></div><div class="overview-card"><span class="overview-icon">⇅</span><div><small>远端状态</small><strong>{{ selectedRepo.behind ? `远端领先 ${selectedRepo.behind}` : selectedRepo.upstream ? '已同步' : '未配置 upstream' }}</strong></div></div><div class="overview-tip">选择左侧变更文件，可查看差异、预览内容和 AI 总结。</div></div>
           <div v-else class="loading-view"><span class="spinner"></span>正在读取文件…</div>
