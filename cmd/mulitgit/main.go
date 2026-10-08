@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -85,11 +87,14 @@ type modelChatMessage struct {
 }
 
 type API struct {
-	configPath    string
-	snapshotPath  string
-	refreshSignal chan struct{}
-	snapshotMu    sync.RWMutex
-	repoSnapshot  []Repository
+	configPath      string
+	snapshotPath    string
+	refreshSignal   chan struct{}
+	refreshMu       sync.Mutex
+	snapshotMu      sync.RWMutex
+	repoSnapshot    []Repository
+	snapshotVersion uint64
+	repoVersions    map[string]uint64
 }
 
 func main() {
@@ -103,6 +108,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/roots", api.handleRoots)
 	mux.HandleFunc("/api/repos", api.handleRepos)
+	mux.HandleFunc("/api/history", api.handleHistory)
+	mux.HandleFunc("/api/history/commit", api.handleHistoryCommit)
 	mux.HandleFunc("/api/repo", api.handleRepo)
 	mux.HandleFunc("/api/file", api.handleFile)
 	mux.HandleFunc("/api/asset", api.handleAsset)
@@ -261,6 +268,7 @@ func (a *API) refreshRepositorySnapshot() {
 	var repos []Repository
 	previousCreatedAt := make(map[string]int64)
 	a.snapshotMu.RLock()
+	version := a.snapshotVersion
 	for _, repo := range a.repoSnapshot {
 		if repo.CreatedAt > 0 {
 			previousCreatedAt[repo.Path] = repo.CreatedAt
@@ -297,10 +305,55 @@ func (a *API) refreshRepositorySnapshot() {
 		}
 		return strings.ToLower(repos[i].Path) < strings.ToLower(repos[j].Path)
 	})
+	// Only serialize publication, so a user operation need not wait for a full scan.
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
 	a.snapshotMu.Lock()
+	latest := make(map[string]Repository)
+	for _, repo := range a.repoSnapshot {
+		if a.repoVersions[repo.Path] > version {
+			latest[repo.Path] = repo
+		}
+	}
+	for i, repo := range repos {
+		if updated, ok := latest[repo.Path]; ok {
+			repos[i] = updated
+		}
+	}
 	a.repoSnapshot = repos
 	a.snapshotMu.Unlock()
 	a.saveRepositorySnapshot(repos)
+}
+
+// refreshRepository publishes the operated repository before returning to the client.
+// Mark the update so an older directory scan cannot overwrite this result.
+func (a *API) refreshRepository(path string) (Repository, error) {
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	repo, err := loadRepository(path)
+	if err != nil {
+		return Repository{}, err
+	}
+	if cfg, err := a.readConfig(); err == nil {
+		repo.LastFetch = cfg.LastFetches[repo.Path]
+	}
+	a.snapshotMu.Lock()
+	a.snapshotVersion++
+	if a.repoVersions == nil {
+		a.repoVersions = make(map[string]uint64)
+	}
+	a.repoVersions[repo.Path] = a.snapshotVersion
+	for i, previous := range a.repoSnapshot {
+		if previous.Path == repo.Path {
+			repo.CreatedAt = previous.CreatedAt
+			a.repoSnapshot[i] = repo
+			break
+		}
+	}
+	repos := append([]Repository(nil), a.repoSnapshot...)
+	a.snapshotMu.Unlock()
+	a.saveRepositorySnapshot(repos)
+	return repo, nil
 }
 
 // repositoryCreatedAt uses the timestamp of the oldest reachable root commit.
@@ -613,7 +666,11 @@ func (a *API) handleFetch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	a.requestRepositoryRefresh()
+	repo, err = a.refreshRepository(path)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, repo)
 }
 
@@ -655,12 +712,11 @@ func (a *API) handlePull(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "快进拉取失败：" + err.Error()})
 		return
 	}
-	updated, err := loadRepository(path)
+	updated, err := a.refreshRepository(path)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	a.requestRepositoryRefresh()
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -775,12 +831,11 @@ func (a *API) handlePush(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "推送失败：" + message})
 		return
 	}
-	updated, err := loadRepository(path)
+	updated, err := a.refreshRepository(path)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	a.requestRepositoryRefresh()
 	writeJSON(w, http.StatusOK, map[string]any{"output": output, "repo": updated, "published": setUpstream})
 }
 
@@ -842,8 +897,11 @@ func (a *API) handleCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash, _ := git(repoPath, "rev-parse", "--short", "HEAD")
-	updated, _ := loadRepository(repoPath)
-	a.requestRepositoryRefresh()
+	updated, err := a.refreshRepository(repoPath)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"output": out, "hash": strings.TrimSpace(hash), "repo": updated})
 }
 
@@ -923,12 +981,11 @@ func (a *API) handleDiscard(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "恢复文件失败：" + err.Error()})
 		return
 	}
-	updated, err := loadRepository(repoPath)
+	updated, err := a.refreshRepository(repoPath)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	a.requestRepositoryRefresh()
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -1595,4 +1652,84 @@ func spaHandler() http.Handler {
 		}
 		fileServer.ServeHTTP(w, r)
 	})
+}
+
+// handleHistory reads the current branch history, optionally following one file.
+func (a *API) handleHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	path, err := a.authorizedRepo(r.URL.Query().Get("repo"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if offset < 0 || offset > 100000 {
+		writeJSON(w, 400, map[string]string{"error": "历史分页位置无效"})
+		return
+	}
+	commits := []map[string]string{}
+	if _, err := git(path, "rev-parse", "--verify", "HEAD"); err != nil {
+		writeJSON(w, 200, map[string]any{"commits": commits, "hasMore": false})
+		return
+	}
+	args := []string{"log", "-z", "--max-count=31", "--skip=" + strconv.Itoa(offset), "--format=%H%x00%h%x00%an%x00%aI%x00%s%x00%b"}
+	file := r.URL.Query().Get("file")
+	if file != "" {
+		rel := filepath.Clean(filepath.FromSlash(file))
+		if filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			writeJSON(w, 400, map[string]string{"error": "文件路径无效"})
+			return
+		}
+		args = append(args, "--follow", "HEAD", "--", filepath.ToSlash(rel))
+	} else {
+		args = append(args, "HEAD", "--")
+	}
+	output, err := git(path, args...)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	fields := strings.Split(strings.TrimSuffix(output, "\x00"), "\x00")
+	for i := 0; i+5 < len(fields); i += 6 {
+		commits = append(commits, map[string]string{"hash": fields[i], "shortHash": fields[i+1], "author": fields[i+2], "date": fields[i+3], "subject": fields[i+4], "body": fields[i+5]})
+	}
+	hasMore := len(commits) > 30
+	if hasMore {
+		commits = commits[:30]
+	}
+	writeJSON(w, 200, map[string]any{"commits": commits, "hasMore": hasMore})
+}
+
+func (a *API) handleHistoryCommit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	path, err := a.authorizedRepo(r.URL.Query().Get("repo"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	hash := r.URL.Query().Get("hash")
+	if _, err := hex.DecodeString(hash); err != nil || (len(hash) != 40 && len(hash) != 64) {
+		writeJSON(w, 400, map[string]string{"error": "提交编号无效"})
+		return
+	}
+	if _, err := git(path, "cat-file", "-e", hash+"^{commit}"); err != nil {
+		writeError(w, err)
+		return
+	}
+	output, err := git(path, "show", "--format=", "--stat", "--patch", "--first-parent", "--no-ext-diff", "--no-textconv", hash, "--")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	truncated := len(output) > maxPreviewSize
+	if truncated {
+		output = strings.ToValidUTF8(output[:maxPreviewSize], "")
+	}
+	writeJSON(w, 200, map[string]any{"diff": output, "truncated": truncated})
 }

@@ -54,7 +54,7 @@ export function renderMarkdown(source: string, repoPath: string, markdownPath: s
 }
 
 const languageByExtension: Record<string, string> = {
-  c: 'c', cc: 'cpp', cpp: 'cpp', cs: 'csharp', css: 'css', go: 'go', h: 'c', hpp: 'cpp',
+  diff: 'diff', patch: 'diff', c: 'c', cc: 'cpp', cpp: 'cpp', cs: 'csharp', css: 'css', go: 'go', h: 'c', hpp: 'cpp',
   html: 'xml', java: 'java', js: 'javascript', json: 'json', jsx: 'javascript', kt: 'kotlin',
   md: 'markdown', mjs: 'javascript', py: 'python', rb: 'ruby', rs: 'rust', sh: 'bash',
   sql: 'sql', svg: 'xml', ts: 'typescript', tsx: 'typescript', vue: 'xml', xml: 'xml',

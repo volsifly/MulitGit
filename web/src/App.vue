@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { isMarkdownPath, renderCode, renderMarkdown } from './rendering'
 
 type ChangedFile = { path: string; originalPath?: string; code: string; staged: boolean; status: string }
@@ -26,7 +26,19 @@ const repos = ref<Repository[]>([])
 const selectedRepoPath = ref('')
 const selectedFilePath = ref('')
 const selectedFiles = ref<string[]>([])
-const activeTab = ref<'diff' | 'preview' | 'summary'>('diff')
+const activeTab = ref<'diff' | 'preview' | 'summary' | 'history'>('diff')
+type HistoryCommit = { hash: string; shortHash: string; author: string; date: string; subject: string; body: string }
+const historyCommits = ref<HistoryCommit[]>([])
+const historyScope = ref<'repo' | 'file'>('repo')
+const historyLoading = ref(false)
+const historyHasMore = ref(false)
+const historyError = ref('')
+const historySelected = ref<HistoryCommit | null>(null)
+const historyDiff = ref('')
+const historyDiffLoading = ref(false)
+const historyTruncated = ref(false)
+let historyRequest = 0
+let historyDetailRequest = 0
 const diffMode = ref<'side-by-side' | 'unified'>('side-by-side')
 const fileContent = ref<FileContent | null>(null)
 const imagePreviewFailed = ref(false)
@@ -48,6 +60,8 @@ const aiScope = ref<'file' | 'all'>('file')
 const aiMessagesElement = ref<HTMLElement | null>(null)
 const aiContextVersion = ref(0)
 let refreshTimer: number | undefined
+let repositoryVersion = 0
+let refreshRequest = 0
 
 const selectedRepo = computed(() => repos.value.find(repo => repo.path === selectedRepoPath.value) ?? null)
 const visibleFiles = computed(() => (selectedRepo.value?.files ?? []).filter(file => file.path.toLowerCase().includes(filter.value.toLowerCase())))
@@ -191,8 +205,11 @@ async function loadSettings() {
   settings.value = { ...defaultSettings, ...await api<AppSettings>('/api/settings') }
 }
 async function refreshRepos(keepSelection = true) {
+  const version = repositoryVersion
+  const request = ++refreshRequest
   try {
     const data = await api<{ roots: string[]; repos: Repository[] }>('/api/repos')
+    if (version !== repositoryVersion || request !== refreshRequest) return
     repos.value = data.repos ?? []
     roots.value = data.roots ?? roots.value
     if (keepSelection && selectedRepoPath.value && !repos.value.some(repo => repo.path === selectedRepoPath.value)) {
@@ -209,6 +226,53 @@ async function refreshRepos(keepSelection = true) {
     }
   } catch (cause) { error.value = (cause as Error).message }
 }
+async function loadHistory(append = false) {
+  const repo = selectedRepoPath.value
+  if (!repo) return
+  const request = ++historyRequest
+  historyLoading.value = true
+  historyError.value = ''
+  if (!append) {
+    historyCommits.value = []
+    historySelected.value = null
+    historyDiff.value = ''
+    historyHasMore.value = false
+    historyDetailRequest++
+    historyDiffLoading.value = false
+  }
+  try {
+    const query = new URLSearchParams({ repo, offset: String(append ? historyCommits.value.length : 0) })
+    if (historyScope.value === 'file' && selectedFilePath.value) query.set('file', selectedFilePath.value)
+    const data = await api<{ commits: HistoryCommit[]; hasMore: boolean }>(`/api/history?${query}`)
+    if (request !== historyRequest) return
+    historyCommits.value = append ? [...historyCommits.value, ...data.commits] : data.commits
+    historyHasMore.value = data.hasMore
+  } catch (cause) {
+    if (request === historyRequest) historyError.value = (cause as Error).message
+  } finally { if (request === historyRequest) historyLoading.value = false }
+}
+async function selectHistoryCommit(commit: HistoryCommit) {
+  const request = ++historyDetailRequest
+  historySelected.value = commit
+  historyDiff.value = ''
+  historyTruncated.value = false
+  historyDiffLoading.value = true
+  historyError.value = ''
+  try {
+    const query = new URLSearchParams({ repo: selectedRepoPath.value, hash: commit.hash })
+    const data = await api<{ diff: string; truncated: boolean }>(`/api/history/commit?${query}`)
+    if (request !== historyDetailRequest) return
+    historyDiff.value = data.diff
+    historyTruncated.value = data.truncated
+  } catch (cause) {
+    if (request === historyDetailRequest) historyError.value = (cause as Error).message
+  } finally { if (request === historyDetailRequest) historyDiffLoading.value = false }
+}
+watch([activeTab, selectedRepoPath, selectedFilePath, historyScope], () => {
+  if (!selectedFilePath.value && historyScope.value === 'file') { historyScope.value = 'repo'; return }
+  if (activeTab.value === 'history') void loadHistory()
+  else { historyRequest++; historyDetailRequest++; historyLoading.value = false; historyDiffLoading.value = false }
+})
 async function addRoot() {
   const path = window.prompt('输入要监控的本地目录绝对路径')
   if (!path?.trim()) return
@@ -250,8 +314,19 @@ async function selectRepo(repo: Repository) {
   } catch (cause) { error.value = (cause as Error).message }
 }
 function updateRepo(updated: Repository) {
+  repositoryVersion++
+  if (activeTab.value === 'history' && selectedRepoPath.value === updated.path) void loadHistory()
   const index = repos.value.findIndex(repo => repo.path === updated.path)
   if (index >= 0) repos.value.splice(index, 1, { ...repos.value[index], ...updated, createdAt: updated.createdAt ?? repos.value[index].createdAt })
+  if (selectedRepoPath.value === updated.path) {
+    selectedFiles.value = selectedFiles.value.filter(path => updated.files.some(file => file.path === path))
+    if (selectedFilePath.value && !updated.files.some(file => file.path === selectedFilePath.value)) {
+      selectedFilePath.value = ''
+      fileContent.value = null
+      aiContextVersion.value++
+      aiMessages.value = []
+    }
+  }
 }
 async function selectFile(path: string) {
   selectedFilePath.value = path
@@ -297,7 +372,6 @@ async function pullRepo() {
     updateRepo(updated)
     notice.value = '拉取完成。'
     selectedFiles.value = updated.files.map(file => file.path)
-    await refreshRepos()
   } catch (cause) { error.value = (cause as Error).message }
   finally { busy.value = '' }
 }
@@ -343,7 +417,6 @@ async function commitSelected() {
     commitMessage.value = ''
     selectedFiles.value = result.repo.files.map(file => file.path)
     notice.value = `提交完成 · ${result.hash}`
-    await refreshRepos()
   } catch (cause) { error.value = (cause as Error).message }
   finally { busy.value = '' }
 }
@@ -370,7 +443,6 @@ async function discardFile(file: ChangedFile) {
       aiMessages.value = []
     }
     notice.value = `已撤销 ${file.path} 的修改。`
-    await refreshRepos()
   } catch (cause) { error.value = (cause as Error).message }
   finally { busy.value = '' }
 }
@@ -566,8 +638,21 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
         <template v-if="selectedRepo">
           <div class="inspector-header"><div><span class="eyebrow">{{ selectedFilePath ? 'FILE INSPECTOR' : 'REPOSITORY' }}</span><h2>{{ selectedFilePath || selectedRepo.name }}</h2></div><div class="inspector-tools"><button class="outline-button" :disabled="busy !== ''" @click="fetchRemote()">{{ busy === 'fetch' ? '检查中…' : '↻ 检查远端' }}</button><button v-if="selectedRepo.behind > 0" class="primary-button pull-button" :disabled="busy !== '' || selectedRepo.dirty" :title="selectedRepo.dirty ? '先处理本地修改' : ''" @click="pullRepo">↓ 拉取 {{ selectedRepo.behind }}</button><button v-if="selectedRepo.ahead > 0 || !selectedRepo.upstream" class="outline-button push-button" :disabled="busy !== '' || (Boolean(selectedRepo.upstream) && selectedRepo.behind > 0)" :title="selectedRepo.behind > 0 ? '远端已有新提交，请先同步' : ''" @click="pushRepo">{{ busy === 'push' ? '推送中…' : selectedRepo.upstream ? `↑ 推送 ${selectedRepo.ahead}` : '↑ 发布分支' }}</button></div></div>
           <div class="remote-strip"><span class="branch-chip"><span>⑂</span>{{ selectedRepo.branch }}</span><span v-if="selectedRepo.upstream" class="remote-text">跟踪 {{ selectedRepo.upstream }} <span v-if="selectedRepo.ahead">· ↑{{ selectedRepo.ahead }}</span><span v-if="selectedRepo.behind">· ↓{{ selectedRepo.behind }}</span><span v-if="!selectedRepo.ahead && !selectedRepo.behind">· 已同步</span></span><span v-else class="remote-text">尚未设置 upstream</span><span class="remote-time">{{ formatDate(selectedRepo.lastFetch) }}</span></div>
-          <div v-if="selectedFilePath" class="tabs"><button :class="{ active: activeTab === 'diff' }" @click="activeTab = 'diff'">Diff</button><button :class="{ active: activeTab === 'preview' }" @click="activeTab = 'preview'">文件预览</button><button :class="{ active: activeTab === 'summary' }" @click="activeTab = 'summary'">✦ AI 总结</button></div>
-          <template v-if="selectedFilePath && fileContent">
+          <div class="tabs"><button :disabled="!selectedFilePath" :class="{ active: activeTab === 'diff' }" @click="activeTab = 'diff'">Diff</button><button :disabled="!selectedFilePath" :class="{ active: activeTab === 'preview' }" @click="activeTab = 'preview'">文件预览</button><button :disabled="!selectedFilePath" :class="{ active: activeTab === 'summary' }" @click="activeTab = 'summary'">✦ AI 总结</button><button :class="{ active: activeTab === 'history' }" @click="activeTab = 'history'">历史</button></div>
+          <div v-if="activeTab === 'history'" class="history-panel">
+            <div class="history-toolbar"><strong>提交历史</strong><div class="diff-mode-switch"><button :class="{ active: historyScope === 'repo' }" @click="historyScope = 'repo'">当前分支</button><button :disabled="!selectedFilePath" :class="{ active: historyScope === 'file' }" @click="historyScope = 'file'">当前文件</button></div><button class="outline-button" :disabled="historyLoading" @click="loadHistory()">刷新</button></div>
+            <div v-if="historyError" class="inline-empty history-error">{{ historyError }}</div>
+            <div class="history-content">
+              <div class="history-list">
+                <button v-for="commit in historyCommits" :key="commit.hash" class="history-item" :class="{ active: historySelected?.hash === commit.hash }" @click="selectHistoryCommit(commit)"><strong>{{ commit.subject }}</strong><small><code>{{ commit.shortHash }}</code> · {{ commit.author }} · {{ new Date(commit.date).toLocaleString() }}</small></button>
+                <div v-if="historyLoading" class="inline-empty">正在读取历史…</div><div v-else-if="!historyCommits.length" class="inline-empty">{{ historyScope === 'file' ? '该文件没有提交记录。' : '当前分支还没有提交记录。' }}</div>
+                <button v-if="historyHasMore" class="outline-button history-more" :disabled="historyLoading" @click="loadHistory(true)">加载更多</button>
+              </div>
+              <div v-if="historySelected" class="history-detail"><div class="history-commit-message"><strong>{{ historySelected.subject }}</strong><small>{{ historySelected.hash }}<br />{{ historySelected.author }} · {{ new Date(historySelected.date).toLocaleString() }}</small><pre v-if="historySelected.body">{{ historySelected.body }}</pre></div><div v-if="historyDiffLoading" class="inline-empty">正在读取提交差异…</div><pre v-else class="history-diff"><span v-html="renderCode(historyDiff || '此提交没有可展示的差异。', 'commit.diff')"></span></pre><div v-if="historyTruncated" class="truncate-note">提交差异较大，仅展示前 512 KB。</div></div>
+              <div v-else-if="historyCommits.length" class="inline-empty">选择一条提交，查看完整提交信息和变更差异。</div>
+            </div>
+          </div>
+          <template v-else-if="selectedFilePath && fileContent">
             <div v-if="activeTab === 'diff'" class="code-view diff-panel">
               <div class="diff-toolbar"><span>比较 <b>HEAD</b> 与 <b>工作区</b></span><div class="diff-mode-switch"><button :class="{ active: diffMode === 'side-by-side' }" @click="diffMode = 'side-by-side'">并排</button><button :class="{ active: diffMode === 'unified' }" @click="diffMode = 'unified'">统一</button></div></div>
               <div v-if="diffMode === 'side-by-side' && splitDiffRows.length" class="split-diff">
