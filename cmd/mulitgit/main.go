@@ -110,6 +110,7 @@ func main() {
 	mux.HandleFunc("/api/repos", api.handleRepos)
 	mux.HandleFunc("/api/history", api.handleHistory)
 	mux.HandleFunc("/api/history/commit", api.handleHistoryCommit)
+	mux.HandleFunc("/api/terminal", api.handleTerminal)
 	mux.HandleFunc("/api/repo", api.handleRepo)
 	mux.HandleFunc("/api/file", api.handleFile)
 	mux.HandleFunc("/api/asset", api.handleAsset)

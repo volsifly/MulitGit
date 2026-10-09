@@ -138,3 +138,9 @@ MulitGit 使用 [MIT License](LICENSE) 开源。第三方依赖仍遵循各自�
 ## 项目状态
 
 MulitGit 正在持续迭代，当前重点是把多仓库日常审查流程放进一个本地工作台。欢迎提交问题、体验反馈和改进建议。
+
+### 仓库终端
+
+右侧「命令行」标签提供 xterm.js + WebSocket + PTY 交互式终端，启动目录为当前仓库。可以直接执行 `ls`、Git 命令和 `codex`，支持交互输入、Tab 补全、Ctrl+C、全屏程序及窗口尺寸同步。终端继承服务用户的 shell、CLI PATH 和 SSH Agent。
+
+每个仓库使用独立会话，切换标签、仓库和设置页面保留会话；刷新或关闭网页会结束对应 shell 及前台程序。终端中的仓库修改每 3 秒同步到列表。目前 PTY 后端支持 Linux/macOS，Windows 需接入 ConPTY。

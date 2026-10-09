@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+const RepoTerminal = defineAsyncComponent(() => import('./RepoTerminal.vue'))
 import { isMarkdownPath, renderCode, renderMarkdown } from './rendering'
 
 type ChangedFile = { path: string; originalPath?: string; code: string; staged: boolean; status: string }
@@ -26,7 +27,8 @@ const repos = ref<Repository[]>([])
 const selectedRepoPath = ref('')
 const selectedFilePath = ref('')
 const selectedFiles = ref<string[]>([])
-const activeTab = ref<'diff' | 'preview' | 'summary' | 'history'>('diff')
+const activeTab = ref<'diff' | 'preview' | 'summary' | 'history' | 'terminal'>('diff')
+const terminalRepos = ref<string[]>([])
 type HistoryCommit = { hash: string; shortHash: string; author: string; date: string; subject: string; body: string }
 const historyCommits = ref<HistoryCommit[]>([])
 const historyScope = ref<'repo' | 'file'>('repo')
@@ -226,6 +228,11 @@ async function refreshRepos(keepSelection = true) {
     }
   } catch (cause) { error.value = (cause as Error).message }
 }
+watch([activeTab, selectedRepoPath], () => {
+  if (activeTab.value === 'terminal' && selectedRepoPath.value && !terminalRepos.value.includes(selectedRepoPath.value)) {
+    terminalRepos.value.push(selectedRepoPath.value)
+  }
+})
 async function loadHistory(append = false) {
   const repo = selectedRepoPath.value
   if (!repo) return
@@ -589,7 +596,7 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
       </div>
     </section>
 
-    <section v-else class="workspace">
+    <section v-show="page === 'workspace'" class="workspace">
       <aside class="sidebar panel">
         <div class="section-heading"><div><span class="eyebrow">WORKSPACES</span><h2>监控目录</h2></div><div class="sidebar-tools"><select v-model="repoSort" class="sort-select" aria-label="仓库排序方式" title="仓库排序方式" @change="changeRepoSort"><option value="name">名称</option><option value="created">创建时间</option><option value="modified">修改时间</option></select><button class="square-button header-action-button" title="添加监控目录" aria-label="添加监控目录" @click="addRoot"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button></div></div>
         <div class="root-list">
@@ -628,7 +635,7 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
           <div class="commit-box">
             <div class="commit-label"><span>COMMIT MESSAGE</span><button class="draft-button" :disabled="!selectedCount || aiBusy" @click="generateCommitDraft">{{ aiBusy ? '起草中…' : '✦ AI 起草' }}</button></div>
             <textarea v-model="commitMessage" placeholder="描述这次修改…" rows="5"></textarea>
-            <button class="primary-button commit-button" :disabled="busy === 'commit' || !selectedCount || !commitMessage.trim()" @click="commitSelected"><span>{{ busy === 'commit' ? '提交中…' : `提交 ${selectedCount} 个文件` }}</span><span>↗</span></button>
+            <button class="primary-button commit-button" :disabled="busy !== '' || !selectedCount || !commitMessage.trim()" @click="commitSelected"><span>{{ busy === 'commit' ? '提交中…' : `提交 ${selectedCount} 个文件` }}</span><span>↗</span></button>
           </div>
         </template>
         <div v-else class="empty-state select-repo"><div class="empty-icon">⌘</div><strong>选择一个仓库</strong><span>查看本地修改和远端状态</span></div>
@@ -638,7 +645,8 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
         <template v-if="selectedRepo">
           <div class="inspector-header"><div><span class="eyebrow">{{ selectedFilePath ? 'FILE INSPECTOR' : 'REPOSITORY' }}</span><h2>{{ selectedFilePath || selectedRepo.name }}</h2></div><div class="inspector-tools"><button class="outline-button" :disabled="busy !== ''" @click="fetchRemote()">{{ busy === 'fetch' ? '检查中…' : '↻ 检查远端' }}</button><button v-if="selectedRepo.behind > 0" class="primary-button pull-button" :disabled="busy !== '' || selectedRepo.dirty" :title="selectedRepo.dirty ? '先处理本地修改' : ''" @click="pullRepo">↓ 拉取 {{ selectedRepo.behind }}</button><button v-if="selectedRepo.ahead > 0 || !selectedRepo.upstream" class="outline-button push-button" :disabled="busy !== '' || (Boolean(selectedRepo.upstream) && selectedRepo.behind > 0)" :title="selectedRepo.behind > 0 ? '远端已有新提交，请先同步' : ''" @click="pushRepo">{{ busy === 'push' ? '推送中…' : selectedRepo.upstream ? `↑ 推送 ${selectedRepo.ahead}` : '↑ 发布分支' }}</button></div></div>
           <div class="remote-strip"><span class="branch-chip"><span>⑂</span>{{ selectedRepo.branch }}</span><span v-if="selectedRepo.upstream" class="remote-text">跟踪 {{ selectedRepo.upstream }} <span v-if="selectedRepo.ahead">· ↑{{ selectedRepo.ahead }}</span><span v-if="selectedRepo.behind">· ↓{{ selectedRepo.behind }}</span><span v-if="!selectedRepo.ahead && !selectedRepo.behind">· 已同步</span></span><span v-else class="remote-text">尚未设置 upstream</span><span class="remote-time">{{ formatDate(selectedRepo.lastFetch) }}</span></div>
-          <div class="tabs"><button :disabled="!selectedFilePath" :class="{ active: activeTab === 'diff' }" @click="activeTab = 'diff'">Diff</button><button :disabled="!selectedFilePath" :class="{ active: activeTab === 'preview' }" @click="activeTab = 'preview'">文件预览</button><button :disabled="!selectedFilePath" :class="{ active: activeTab === 'summary' }" @click="activeTab = 'summary'">✦ AI 总结</button><button :class="{ active: activeTab === 'history' }" @click="activeTab = 'history'">历史</button></div>
+          <div class="tabs"><button :disabled="!selectedFilePath" :class="{ active: activeTab === 'diff' }" @click="activeTab = 'diff'">Diff</button><button :disabled="!selectedFilePath" :class="{ active: activeTab === 'preview' }" @click="activeTab = 'preview'">文件预览</button><button :disabled="!selectedFilePath" :class="{ active: activeTab === 'summary' }" @click="activeTab = 'summary'">✦ AI 总结</button><button :class="{ active: activeTab === 'history' }" @click="activeTab = 'history'">历史</button><button :class="{ active: activeTab === 'terminal' }" @click="activeTab = 'terminal'">命令行</button></div>
+          <RepoTerminal v-for="path in terminalRepos" :key="path" v-show="activeTab === 'terminal' && selectedRepoPath === path" :repo="path" :active="activeTab === 'terminal' && selectedRepoPath === path && page === 'workspace'" :font-size="settings.fontSize" :font-family="settings.fontFamily === 'mono' ? 'monospace' : 'Consolas, Liberation Mono, monospace'" @repo="updateRepo" />
           <div v-if="activeTab === 'history'" class="history-panel">
             <div class="history-toolbar"><strong>提交历史</strong><div class="diff-mode-switch"><button :class="{ active: historyScope === 'repo' }" @click="historyScope = 'repo'">当前分支</button><button :disabled="!selectedFilePath" :class="{ active: historyScope === 'file' }" @click="historyScope = 'file'">当前文件</button></div><button class="outline-button" :disabled="historyLoading" @click="loadHistory()">刷新</button></div>
             <div v-if="historyError" class="inline-empty history-error">{{ historyError }}</div>
@@ -652,7 +660,7 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
               <div v-else-if="historyCommits.length" class="inline-empty">选择一条提交，查看完整提交信息和变更差异。</div>
             </div>
           </div>
-          <template v-else-if="selectedFilePath && fileContent">
+          <template v-else-if="activeTab !== 'terminal' && selectedFilePath && fileContent">
             <div v-if="activeTab === 'diff'" class="code-view diff-panel">
               <div class="diff-toolbar"><span>比较 <b>HEAD</b> 与 <b>工作区</b></span><div class="diff-mode-switch"><button :class="{ active: diffMode === 'side-by-side' }" @click="diffMode = 'side-by-side'">并排</button><button :class="{ active: diffMode === 'unified' }" @click="diffMode = 'unified'">统一</button></div></div>
               <div v-if="diffMode === 'side-by-side' && splitDiffRows.length" class="split-diff">
@@ -683,8 +691,8 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
               <div class="ai-chat-foot">{{ aiScope === 'file' ? `上下文：${selectedFilePath}` : `上下文：全部 ${selectedRepo.files.length} 个变更文件` }} · diff 最大 512 KB</div>
             </div>
           </template>
-          <div v-else-if="!selectedFilePath" class="repo-overview"><div class="overview-card"><span class="overview-icon">⌘</span><div><small>当前分支</small><strong>{{ selectedRepo.branch }}</strong></div></div><div class="overview-card"><span class="overview-icon">◉</span><div><small>本地状态</small><strong>{{ selectedRepo.files.length ? `${selectedRepo.files.length} 个变更文件` : '工作区干净' }}</strong></div></div><div class="overview-card"><span class="overview-icon">⇅</span><div><small>远端状态</small><strong>{{ selectedRepo.behind ? `远端领先 ${selectedRepo.behind}` : selectedRepo.upstream ? '已同步' : '未配置 upstream' }}</strong></div></div><div class="overview-tip">选择左侧变更文件，可查看差异、预览内容和 AI 总结。</div></div>
-          <div v-else class="loading-view"><span class="spinner"></span>正在读取文件…</div>
+          <div v-else-if="activeTab !== 'terminal' && !selectedFilePath" class="repo-overview"><div class="overview-card"><span class="overview-icon">⌘</span><div><small>当前分支</small><strong>{{ selectedRepo.branch }}</strong></div></div><div class="overview-card"><span class="overview-icon">◉</span><div><small>本地状态</small><strong>{{ selectedRepo.files.length ? `${selectedRepo.files.length} 个变更文件` : '工作区干净' }}</strong></div></div><div class="overview-card"><span class="overview-icon">⇅</span><div><small>远端状态</small><strong>{{ selectedRepo.behind ? `远端领先 ${selectedRepo.behind}` : selectedRepo.upstream ? '已同步' : '未配置 upstream' }}</strong></div></div><div class="overview-tip">选择左侧变更文件，可查看差异、预览内容和 AI 总结。</div></div>
+          <div v-else-if="activeTab !== 'terminal'" class="loading-view"><span class="spinner"></span>正在读取文件…</div>
         </template>
         <div v-else class="empty-state welcome"><div class="welcome-mark">M</div><span class="eyebrow">LOCAL GIT WORKSPACE</span><h1>所有仓库，<br />一览无余。</h1><p>添加一个监控目录，MulitGit 会自动发现其中的仓库，集中查看修改并了解远端动态。</p><button class="primary-button" @click="addRoot">＋ 添加监控目录</button><div class="welcome-foot">本地运行 · Git 操作由你确认</div></div>
       </section>
