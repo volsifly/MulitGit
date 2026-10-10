@@ -127,6 +127,7 @@ flowchart LR
 
 - **服务端**：Go、系统 Git CLI、本地 JSON 配置和仓库状态快照
 - **界面**：Vue 3、TypeScript、Vite
+- **原生桌面客户端（实验版）**：Rust、GPUI，复用 Go 服务 API；运行方式与首版覆盖范围见 [CLIENT-RUST.md](CLIENT-RUST.md)
 - **预览**：Marked、highlight.js、DOMPurify
 - **模型接口**：兼容 OpenAI Chat Completions API 的服务
 - **打包**：Go `embed` 内嵌前端产物，支持 Go 跨平台编译
