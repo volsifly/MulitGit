@@ -11,3 +11,13 @@ web/dist/
 
 /mulitgit
 /mulitgit.exe
+
+/internal/webui/dist/
+/build/bin/
+/wailsjs/
+/mulitgit-desktop
+/mulitgit-desktop.exe
+
+/web/wailsjs/
+
+/package.json.md5

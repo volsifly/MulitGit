@@ -9,7 +9,10 @@
     "preview": "vite preview --host 127.0.0.1",
     "build:server": "go build ./cmd/mulitgit",
     "build:all": "npm run build && npm run build:server",
-    "dev:server": "go run ./cmd/mulitgit"
+    "dev:server": "go run ./cmd/mulitgit",
+    "dev:desktop": "cd cmd/mulitgit-desktop && wails dev",
+    "build:desktop": "cd cmd/mulitgit-desktop && wails build",
+    "install:desktop": "bash scripts/install-desktop.sh"
   },
   "dependencies": {
     "@vitejs/plugin-vue": "^6.0.1",

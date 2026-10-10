@@ -1,6 +1,6 @@
 //go:build !windows
 
-package main
+package workbench
 
 import (
 	"encoding/json"
@@ -29,6 +29,9 @@ func (a *API) handleTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool {
+		if a.DesktopOrigin(r.Header.Get("Origin")) {
+			return true
+		}
 		origin, err := url.Parse(r.Header.Get("Origin"))
 		return err == nil && (origin.Scheme == "http" || origin.Scheme == "https") && strings.EqualFold(origin.Host, r.Host)
 	}}
@@ -82,6 +85,13 @@ func (a *API) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = unix.SetNonblock(int(terminal.Fd()), true)
 	done := make(chan struct{})
+	go func() {
+		select {
+		case <-a.shutdown.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
 	var flowMu sync.Mutex
 	flow := make(chan struct{})
 	close(flow)

@@ -127,6 +127,7 @@ flowchart LR
 
 - **服务端**：Go、系统 Git CLI、本地 JSON 配置和仓库状态快照
 - **界面**：Vue 3、TypeScript、Vite
+- **桌面客户端**：Wails + 系统 WebView，复用 Web 界面和 Go 业务；见 [桌面版使用与构建说明](CLIENT-WAILS.md)
 - **预览**：Marked、highlight.js、DOMPurify
 - **模型接口**：兼容 OpenAI Chat Completions API 的服务
 - **打包**：Go `embed` 内嵌前端产物，支持 Go 跨平台编译

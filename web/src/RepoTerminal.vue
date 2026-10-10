@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { terminalURL } from './backend'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -31,9 +32,7 @@ function connect() {
   socket?.close()
   status.value = '连接中'
   connected.value = false
-  const url = new URL('/api/terminal', window.location.href)
-  url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  url.searchParams.set('repo', props.repo)
+  const url = terminalURL(props.repo)
   const connection = new WebSocket(url)
   connection.binaryType = 'arraybuffer'
   socket = connection

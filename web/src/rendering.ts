@@ -1,3 +1,4 @@
+import { backendURL } from './backend'
 import DOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/common'
 import { Marked, Renderer } from 'marked'
@@ -45,7 +46,7 @@ export function renderMarkdown(source: string, repoPath: string, markdownPath: s
   renderer.image = ({ href, title, text }) => {
     const assetPath = repositoryAssetPath(href, markdownPath)
     if (!assetPath) return `<span class="markdown-image-blocked">[图片未加载：${escapeAttribute(text)}]</span>`
-    const url = `/api/asset?repo=${encodeURIComponent(repoPath)}&path=${encodeURIComponent(assetPath)}`
+    const url = backendURL(`/api/asset?repo=${encodeURIComponent(repoPath)}&path=${encodeURIComponent(assetPath)}`)
     const titleAttribute = title ? ` title="${escapeAttribute(title)}"` : ''
     return `<img src="${url}" alt="${escapeAttribute(text)}"${titleAttribute} loading="lazy">`
   }

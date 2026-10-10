@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 const RepoTerminal = defineAsyncComponent(() => import('./RepoTerminal.vue'))
+import { initializeBackend, backendURL, backendHeaders, chooseDirectory, isDesktop } from './backend'
 import { isMarkdownPath, renderCode, renderMarkdown } from './rendering'
 
 type ChangedFile = { path: string; originalPath?: string; code: string; staged: boolean; status: string }
@@ -71,7 +72,7 @@ const visibleFiles = computed(() => (selectedRepo.value?.files ?? []).filter(fil
 const splitDiffRows = computed(() => parseUnifiedDiff(fileContent.value?.diff ?? ''))
 const isImagePreview = computed(() => isImagePath(selectedFilePath.value))
 const imagePreviewUrl = computed(() => selectedRepoPath.value && selectedFilePath.value
-  ? `/api/asset?repo=${encodeURIComponent(selectedRepoPath.value)}&path=${encodeURIComponent(selectedFilePath.value)}`
+  ? backendURL(`/api/asset?repo=${encodeURIComponent(selectedRepoPath.value)}&path=${encodeURIComponent(selectedFilePath.value)}`)
   : '')
 const groupedRepos = computed(() => {
   const result = new Map<string, Repository[]>()
@@ -195,7 +196,7 @@ function formatDate(value?: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { ...init, headers: { 'Content-Type': 'application/json', ...init?.headers } })
+  const response = await fetch(backendURL(url), { ...init, headers: { 'Content-Type': 'application/json', ...backendHeaders(), ...init?.headers } })
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(payload.error || `请求失败 (${response.status})`)
   return payload as T
@@ -282,11 +283,12 @@ watch([activeTab, selectedRepoPath, selectedFilePath, historyScope], () => {
   else { historyRequest++; historyDetailRequest++; historyLoading.value = false; historyDiffLoading.value = false }
 })
 async function addRoot() {
-  const path = window.prompt('输入要监控的本地目录绝对路径')
-  if (!path?.trim()) return
+  if (busy.value) return
   error.value = ''
-  busy.value = 'root'
   try {
+    const path = await chooseDirectory()
+    if (!path?.trim()) return
+    busy.value = 'root'
     const config = await api<RootConfig>('/api/roots', { method: 'POST', body: JSON.stringify({ path: path.trim() }) })
     roots.value = config.watchRoots ?? []
     await refreshRepos(false)
@@ -559,7 +561,7 @@ async function generateCommitDraft() {
 }
 
 onMounted(async () => {
-  try { await Promise.all([loadRoots(), loadSettings()]); await refreshRepos(false) }
+  try { await initializeBackend(); await Promise.all([loadRoots(), loadSettings()]); await refreshRepos(false) }
   catch (cause) { error.value = (cause as Error).message }
   refreshTimer = window.setInterval(() => void refreshRepos(), 2000)
 })
@@ -570,7 +572,7 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
   <main class="app-shell" :style="appStyle">
     <header class="topbar">
       <div class="brand"><div class="brand-mark"><img src="/mulitgit.svg" alt="" /></div><div><strong>MulitGit</strong><span>LOCAL WORKSPACE</span></div></div>
-      <div class="topbar-right"><span class="local-pill"><i></i> 本地运行</span><button v-if="page === 'workspace'" class="icon-button" title="打开设置" @click="page = 'settings'">⚙</button><button v-else class="outline-button" @click="page = 'workspace'">← 返回工作台</button><button v-if="page === 'workspace'" class="icon-button" title="刷新仓库" @click="refreshRepos(false)">↻</button></div>
+      <div class="topbar-right"><span class="local-pill"><i></i> {{ isDesktop() ? '桌面客户端' : '本地运行' }}</span><button v-if="page === 'workspace'" class="icon-button" title="打开设置" @click="page = 'settings'">⚙</button><button v-else class="outline-button" @click="page = 'workspace'">← 返回工作台</button><button v-if="page === 'workspace'" class="icon-button" title="刷新仓库" @click="refreshRepos(false)">↻</button></div>
     </header>
 
     <section v-if="page === 'settings'" class="settings-page">
