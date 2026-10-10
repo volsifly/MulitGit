@@ -45,6 +45,7 @@ const diffMode = ref<'side-by-side' | 'unified'>('side-by-side')
 const fileContent = ref<FileContent | null>(null)
 const imagePreviewFailed = ref(false)
 const commitMessage = ref('')
+const pushAfterCommit = ref(false)
 const busy = ref('')
 const error = ref('')
 const notice = ref('')
@@ -382,49 +383,59 @@ async function pullRepo() {
   } catch (cause) { error.value = (cause as Error).message }
   finally { busy.value = '' }
 }
+async function pushRepository(repo: Repository): Promise<string> {
+  if (repo.upstream && repo.behind > 0) {
+    throw new Error('远端已有新提交，请先拉取或处理分叉后再推送。')
+  }
+  const destination = repo.upstream || `origin/${repo.branch}`
+  const result = await api<{ repo: Repository; published: boolean }>('/api/push', {
+    method: 'POST', body: JSON.stringify({ path: repo.path }),
+  })
+  updateRepo(result.repo)
+  return result.published
+    ? `分支已发布到 ${result.repo.upstream || destination}，并设置了 upstream。`
+    : `已推送到 ${result.repo.upstream || destination}。`
+}
 async function pushRepo() {
   const repo = selectedRepo.value
-  if (!repo) return
-  const publishing = !repo.upstream
-  const destination = publishing ? `origin/${repo.branch}` : repo.upstream
-  if (!publishing && repo.behind > 0) {
-    error.value = '远端已有新提交，请先拉取或处理分叉后再推送。'
-    return
-  }
-  const confirmation = publishing
-    ? `首次发布分支 ${repo.branch} 到 ${destination} 并设置 upstream？`
-    : `推送 ${repo.ahead} 个本地提交到 ${destination}？`
-  const details = repo.dirty ? '\n\n未提交的文件修改不会上传；只有已提交的内容会被推送。' : '\n\n只会推送已提交的内容。'
-  if (!window.confirm(`${confirmation}${details}\nGit 会拒绝非快进推送，不会强制覆盖远端。`)) return
-  busy.value = 'push'
-  error.value = ''
+  if (!repo || busy.value) return
+  busy.value = 'push'; error.value = ''; notice.value = ''
   try {
-    const result = await api<{ repo: Repository; published: boolean }>('/api/push', {
-      method: 'POST', body: JSON.stringify({ path: repo.path }),
-    })
-    updateRepo(result.repo)
-    notice.value = result.published ? `分支已发布到 ${result.repo.upstream || destination}，并设置了 upstream。` : `已推送到 ${result.repo.upstream || destination}。`
+    notice.value = await pushRepository(repo)
   } catch (cause) { error.value = (cause as Error).message }
   finally { busy.value = '' }
 }
 async function commitSelected() {
+  if (busy.value) return
   const repo = selectedRepo.value
   if (!repo || !selectedFiles.value.length || !commitMessage.value.trim()) {
     error.value = '先选择文件并填写 commit 信息。'; return
   }
   const paths = selectedFiles.value.slice()
-  const confirmText = `提交到 ${repo.name}：\n\n${paths.map(path => `• ${path}`).join('\n')}\n\n${commitMessage.value.trim()}`
-  if (!window.confirm(confirmText)) return
-  busy.value = 'commit'; error.value = ''
+  const shouldPush = pushAfterCommit.value
+  let committedHash = ''
+  busy.value = 'commit'; error.value = ''; notice.value = ''
   try {
     const result = await api<{ hash: string; repo: Repository }>('/api/commit', {
       method: 'POST', body: JSON.stringify({ path: repo.path, files: paths, message: commitMessage.value.trim() }),
     })
+    committedHash = result.hash
     updateRepo(result.repo)
-    commitMessage.value = ''
-    selectedFiles.value = result.repo.files.map(file => file.path)
+    if (selectedRepoPath.value === repo.path) {
+      commitMessage.value = ''
+      selectedFiles.value = result.repo.files.map(file => file.path)
+    }
     notice.value = `提交完成 · ${result.hash}`
-  } catch (cause) { error.value = (cause as Error).message }
+    if (shouldPush) {
+      busy.value = 'push'
+      const pushNotice = await pushRepository(result.repo)
+      notice.value = `提交完成 · ${result.hash}；${pushNotice}`
+    }
+  } catch (cause) {
+    error.value = committedHash
+      ? `提交已完成 · ${committedHash}，推送失败：${(cause as Error).message}`
+      : (cause as Error).message
+  }
   finally { busy.value = '' }
 }
 async function discardFile(file: ChangedFile) {
@@ -635,7 +646,10 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
           <div class="commit-box">
             <div class="commit-label"><span>COMMIT MESSAGE</span><button class="draft-button" :disabled="!selectedCount || aiBusy" @click="generateCommitDraft">{{ aiBusy ? '起草中…' : '✦ AI 起草' }}</button></div>
             <textarea v-model="commitMessage" placeholder="描述这次修改…" rows="5"></textarea>
-            <button class="primary-button commit-button" :disabled="busy !== '' || !selectedCount || !commitMessage.trim()" @click="commitSelected"><span>{{ busy === 'commit' ? '提交中…' : `提交 ${selectedCount} 个文件` }}</span><span>↗</span></button>
+            <div class="commit-actions">
+              <button class="primary-button commit-button" :disabled="busy !== '' || !selectedCount || !commitMessage.trim()" @click="commitSelected"><span>{{ busy === 'commit' ? '提交中…' : busy === 'push' ? '推送中…' : `提交 ${selectedCount} 个文件` }}</span><span>↗</span></button>
+              <label class="commit-push-option"><input v-model="pushAfterCommit" type="checkbox" :disabled="busy !== ''" />同时推送</label>
+            </div>
           </div>
         </template>
         <div v-else class="empty-state select-repo"><div class="empty-icon">⌘</div><strong>选择一个仓库</strong><span>查看本地修改和远端状态</span></div>
