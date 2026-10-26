@@ -151,3 +151,18 @@
 .sidebar > .section-heading{flex-wrap:wrap;gap:10px}.sidebar-tools{margin-left:auto;flex-shrink:0}
 
 .workspace{min-height:0}
+
+/* Repository hierarchy: each row owns its disclosure; indentation follows real path depth. */
+.repository-tree-node{min-width:0}
+.tree-item-row{display:flex;align-items:center;gap:5px;min-height:30px;border-radius:7px;padding-right:6px;color:#727b86}
+.tree-item-row:hover{background:#f7f8f9}
+.tree-item-row.active{background:#edf5f1;color:#28694f}
+.tree-item-row:focus-within .root-remove,.tree-item-row:hover .root-remove{opacity:1}
+.tree-root-row{margin-top:7px;font-weight:600}
+.tree-repo-row{min-height:46px}
+.tree-item-main{display:flex;align-items:center;gap:7px;min-width:0;flex:1;align-self:stretch;padding:5px 0;border:0;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
+.tree-folder-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--ui-font-size)}
+.tree-item-main .repo-label{min-width:0;flex:1}
+.tree-disclosure,.tree-disclosure-spacer{width:18px;flex:0 0 18px;text-align:center}
+.tree-disclosure{padding:3px 0}
+.tree-item-main:focus-visible,.tree-disclosure:focus-visible,.tree-item-row .root-remove:focus-visible{outline:2px solid #438263;outline-offset:1px;border-radius:3px}

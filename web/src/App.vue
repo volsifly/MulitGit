@@ -3,6 +3,8 @@ import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, 
 const RepoTerminal = defineAsyncComponent(() => import('./RepoTerminal.vue'))
 import { initializeBackend, backendURL, backendHeaders, chooseDirectory, isDesktop } from './backend'
 import { isMarkdownPath, renderCode, renderMarkdown } from './rendering'
+import RepositoryTreeItem from './RepositoryTreeItem.vue'
+import { buildRepositoryTrees } from './repositoryTree'
 
 type ChangedFile = { path: string; originalPath?: string; code: string; staged: boolean; status: string }
 type Repository = {
@@ -46,12 +48,37 @@ const diffMode = ref<'side-by-side' | 'unified'>('side-by-side')
 const fileContent = ref<FileContent | null>(null)
 const imagePreviewFailed = ref(false)
 const commitMessage = ref('')
-const pushAfterCommit = ref(false)
+const pushAfterCommit = ref(loadPushAfterCommit())
+function loadPushAfterCommit(): boolean {
+  try { return localStorage.getItem('mulitgit.pushAfterCommit') === 'true' }
+  catch { return false }
+}
+watch(pushAfterCommit, value => {
+  try { localStorage.setItem('mulitgit.pushAfterCommit', String(value)) }
+  catch { /* Keep the current preference usable when browser storage is unavailable. */ }
+}, { flush: 'sync' })
 const busy = ref('')
 const error = ref('')
 const notice = ref('')
 const filter = ref('')
-const treeExpanded = ref(true)
+const collapsedTreePaths = ref<Set<string>>(loadCollapsedTreePaths())
+function loadCollapsedTreePaths(): Set<string> {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem('mulitgit.collapsedTreePaths') ?? '[]')
+    return new Set(Array.isArray(saved) ? saved.filter((key): key is string => typeof key === 'string') : [])
+  } catch { return new Set() }
+}
+function toggleTreeFolder(key: string) {
+  const next = new Set(collapsedTreePaths.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  collapsedTreePaths.value = next
+  localStorage.setItem('mulitgit.collapsedTreePaths', JSON.stringify([...next]))
+}
+function selectTreeRepo(path: string) {
+  const repo = repos.value.find(item => item.path === path)
+  if (repo) void selectRepo(repo)
+}
 const savedRepoSort = localStorage.getItem('mulitgit.repoSort')
 const repoSort = ref<RepoSort>(savedRepoSort === 'name' || savedRepoSort === 'created' || savedRepoSort === 'modified' ? savedRepoSort : 'modified')
 const settings = ref<AppSettings>({ ...defaultSettings })
@@ -74,21 +101,7 @@ const isImagePreview = computed(() => isImagePath(selectedFilePath.value))
 const imagePreviewUrl = computed(() => selectedRepoPath.value && selectedFilePath.value
   ? backendURL(`/api/asset?repo=${encodeURIComponent(selectedRepoPath.value)}&path=${encodeURIComponent(selectedFilePath.value)}`)
   : '')
-const groupedRepos = computed(() => {
-  const result = new Map<string, Repository[]>()
-  for (const repo of [...repos.value].sort(compareRepos)) {
-    const group = parentLabel(repo.path)
-    if (!result.has(group)) result.set(group, [])
-    result.get(group)!.push(repo)
-  }
-  return [...result.entries()].sort(([groupA, itemsA], [groupB, itemsB]) => {
-    if (repoSort.value === 'name') return groupA.localeCompare(groupB, 'zh-CN', { numeric: true, sensitivity: 'base' })
-    const field = repoSort.value === 'created' ? 'createdAt' : 'lastModified'
-    const latestA = Math.max(...itemsA.map(repo => repo[field] ?? 0))
-    const latestB = Math.max(...itemsB.map(repo => repo[field] ?? 0))
-    return latestB - latestA || groupA.localeCompare(groupB, 'zh-CN', { numeric: true, sensitivity: 'base' })
-  })
-})
+const repositoryTrees = computed(() => buildRepositoryTrees(roots.value, repos.value, repoSort.value))
 const selectedCount = computed(() => selectedFiles.value.length)
 const isMarkdownPreview = computed(() => isMarkdownPath(selectedFilePath.value))
 const renderedMarkdown = computed(() => fileContent.value ? renderMarkdown(fileContent.value.preview, selectedRepoPath.value, selectedFilePath.value) : '')
@@ -101,19 +114,6 @@ const appStyle = computed(() => ({
   '--code-white-space': settings.value.wordWrap ? 'pre-wrap' : 'pre',
 }))
 
-function parentLabel(path: string) {
-  const normalized = path.replaceAll('\\', '/')
-  const parts = normalized.split('/').filter(Boolean)
-  return parts.length > 1 ? parts.slice(0, -1).join('/') : path
-}
-function compareRepos(a: Repository, b: Repository) {
-  if (repoSort.value === 'name') {
-    return a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }) || a.path.localeCompare(b.path)
-  }
-  const timeA = repoSort.value === 'created' ? (a.createdAt ?? 0) : a.lastModified
-  const timeB = repoSort.value === 'created' ? (b.createdAt ?? 0) : b.lastModified
-  return timeB - timeA || a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' })
-}
 function changeRepoSort() {
   localStorage.setItem('mulitgit.repoSort', repoSort.value)
 }
@@ -172,11 +172,6 @@ function parseUnifiedDiff(diff: string): CompareRow[] {
   }
   flushChanges()
   return rows
-}
-function shortPath(path: string) {
-  const normalized = path.replaceAll('\\', '/')
-  const parts = normalized.split('/').filter(Boolean)
-  return parts.slice(-2).join('/') || path
 }
 function iconFor(code: string) {
   if (code === '??') return '＋'
@@ -613,19 +608,10 @@ onUnmounted(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
       <aside class="sidebar panel">
         <div class="section-heading"><div><span class="eyebrow">WORKSPACES</span><h2>监控目录</h2></div><div class="sidebar-tools"><select v-model="repoSort" class="sort-select" aria-label="仓库排序方式" title="仓库排序方式" @change="changeRepoSort"><option value="name">名称</option><option value="created">创建时间</option><option value="modified">修改时间</option></select><button class="square-button header-action-button" title="添加监控目录" aria-label="添加监控目录" @click="addRoot"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button></div></div>
         <div class="root-list">
-          <div v-for="(root, index) in roots" :key="root" class="root-block">
-            <div class="root-row"><button class="disclosure" @click="treeExpanded = !treeExpanded">{{ treeExpanded ? '⌄' : '›' }}</button><span class="folder-icon">▱</span><span class="root-name" :title="root">{{ shortPath(root) }}</span><button class="root-remove" title="移除目录" @click="removeRoot(index)">×</button></div>
-            <template v-if="treeExpanded">
-              <template v-for="([group, items]) in groupedRepos" :key="group">
-                <div v-if="items.some(repo => repo.path === root || repo.path.startsWith(root + '/') || repo.path.startsWith(root + '\\'))" class="folder-group">
-                  <div class="nested-folder"><span>⌄</span><span>▱</span><span>{{ group === root ? '此目录' : shortPath(group) }}</span></div>
-                  <button v-for="repo in items.filter(item => item.path === root || item.path.startsWith(root + '/') || item.path.startsWith(root + '\\'))" :key="repo.path" class="repo-row" :class="{ active: selectedRepoPath === repo.path }" @click="selectRepo(repo)">
-                    <span class="repo-indicator" :class="{ dirty: repo.dirty }"></span><span class="repo-glyph">⌘</span><span class="repo-label"><b>{{ repo.name }}</b><small>{{ repo.branch }}</small></span><span v-if="repo.behind" class="ahead-badge" :title="`远端领先 ${repo.behind} 个提交，可拉取`">↓{{ repo.behind }}</span><span v-if="repo.ahead" class="ahead-badge" :title="`${repo.ahead} 个本地提交尚未推送`">↑{{ repo.ahead }}</span>
-                  </button>
-                </div>
-              </template>
-              <div v-if="!repos.some(repo => repo.path === root || repo.path.startsWith(root + '/') || repo.path.startsWith(root + '\\'))" class="empty-root">暂未发现 Git 仓库</div>
-            </template>
+          <div role="tree" aria-label="监控目录与仓库">
+            <RepositoryTreeItem v-for="root in repositoryTrees" :key="root.key" :node="root"
+              :collapsed="collapsedTreePaths" :selected-path="selectedRepoPath"
+              @toggle="toggleTreeFolder" @select="selectTreeRepo" @remove="removeRoot" />
           </div>
           <div v-if="!roots.length" class="empty-state sidebar-empty"><div class="empty-icon">⌁</div><strong>添加一个工作目录</strong><span>自动查找目录下的 Git 仓库</span><button class="text-button" @click="addRoot">＋ 添加目录</button></div>
         </div>
