@@ -3,6 +3,9 @@ import vue from '@vitejs/plugin-vue'
 
 export default defineConfig({
   plugins: [vue()],
+  // Syntax minification corrupts xterm 6's local DECRQM enum binding.
+  // Keep identifier/whitespace minification, but preserve protocol handler syntax.
+  esbuild: { minifySyntax: false },
   root: 'web',
   server: {
     host: '127.0.0.1',

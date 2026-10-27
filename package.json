@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vue-tsc -b && vite build",
+    "test:terminal": "node --test scripts/test-terminal-bundle.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "build:server": "go build ./cmd/mulitgit",
     "build:all": "npm run build && npm run build:server",
